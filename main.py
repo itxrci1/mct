@@ -1,16 +1,23 @@
 import asyncio
 import aiohttp
 import random
+import os
+from dotenv import load_dotenv
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from motor.motor_asyncio import AsyncIOMotorClient
 
-BOT_TOKEN = "8300519461:AAGub3h_FqGkggWkGGE95Pgh8k4u6deI_F4"
-MONGO_URI = "mongodb+srv://itxcriminal:qureshihashmI1@cluster0.jyqy9.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+# load env
+load_dotenv()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+MONGO_URI = os.getenv("MONGO_URI")
 
 user_tokens = {}       # token saved until manually changed
 matching_tasks = {}    # active matching tasks
+
 mongo = AsyncIOMotorClient(MONGO_URI)
 config = mongo["meeff_db"]["config"]
 
@@ -46,32 +53,51 @@ async def start_matching(chat_id, token, explore_url):
     headers = HEADERS.copy()
     headers["meeff-access-token"] = token
 
-    stats = {"requests": 0, "cycles": 0, "errors": 0}
-    stat_msg = await bot.send_message(chat_id, "Matching started")
+    stats = {
+        "requests": 0,
+        "cycles": 0,
+        "errors": 0,
+        "matched": 0
+    }
 
-    stop_keyboard = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Stop Matching")]], resize_keyboard=True)
+    stat_msg = await bot.send_message(chat_id, "Matching started...")
+
+    stop_keyboard = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="Stop Matching")]],
+        resize_keyboard=True
+    )
     await stat_msg.edit_reply_markup(stop_keyboard)
 
     timeout = aiohttp.ClientTimeout(total=30)
     connector = aiohttp.TCPConnector(ssl=False, limit_per_host=10)
+
     empty_count = 0
     stop_reason = None
 
     try:
-        async with aiohttp.ClientSession(timeout=timeout, connector=connector, headers=headers) as session:
+        async with aiohttp.ClientSession(
+            timeout=timeout,
+            connector=connector,
+            headers=headers
+        ) as session:
 
             async def answer_user(user_id):
                 nonlocal stop_reason
                 try:
                     async with session.get(ANSWER_URL.format(user_id=user_id)) as res:
                         text = await res.text()
+
                         if res.status == 429 or "LikeExceeded" in text:
                             stop_reason = "limit"
                             return False
+
                         if res.status == 401 or "AuthRequired" in text:
                             stop_reason = "token"
                             return False
+
+                        stats["matched"] += 1
                         return True
+
                 except:
                     stats["errors"] += 1
                     return True
@@ -93,6 +119,8 @@ async def start_matching(chat_id, token, explore_url):
 
                 empty_count = 0
                 users = data["users"]
+                batch_size = len(users)
+
                 tasks = []
                 results = []
 
@@ -104,6 +132,7 @@ async def start_matching(chat_id, token, explore_url):
                     task = asyncio.create_task(answer_user(user_id))
                     tasks.append(task)
                     stats["requests"] += 1
+
                     await asyncio.sleep(random.uniform(0.05, 0.2))
 
                     if len(tasks) >= 10:
@@ -117,11 +146,15 @@ async def start_matching(chat_id, token, explore_url):
                     break
 
                 stats["cycles"] += 1
+
                 await stat_msg.edit_text(
-                    f"Requests: {stats['requests']}\n"
-                    f"Cycles: {stats['cycles']}\n"
-                    f"Errors: {stats['errors']}\n"
-                    f"To stop, send /stop or press Stop Matching"
+                    f"🔄 Matching in progress...\n\n"
+                    f"📦 Batches completed: {stats['cycles']}\n"
+                    f"👥 Users in last batch: {batch_size}\n"
+                    f"✅ Total matched: {stats['matched']}\n"
+                    f"📡 Requests sent: {stats['requests']}\n"
+                    f"⚠️ Errors: {stats['errors']}\n\n"
+                    f"Press Stop Matching to stop"
                 )
 
                 await asyncio.sleep(random.uniform(1, 2))
@@ -142,8 +175,8 @@ async def start_matching(chat_id, token, explore_url):
         keyboard=[[KeyboardButton(text="Start Matching")]],
         resize_keyboard=True
     )
-    await bot.send_message(chat_id, text, reply_markup=keyboard)
 
+    await bot.send_message(chat_id, text, reply_markup=keyboard)
     matching_tasks.pop(chat_id, None)
 
 
@@ -157,7 +190,13 @@ async def set_url(message: types.Message):
     url = message.text.replace("/seturl", "").strip()
     if not url.startswith("https://"):
         return await message.answer("Invalid URL")
-    await config.update_one({"_id": "explore_url"}, {"$set": {"url": url}}, upsert=True)
+
+    await config.update_one(
+        {"_id": "explore_url"},
+        {"$set": {"url": url}},
+        upsert=True
+    )
+
     await message.answer("URL saved")
 
 
@@ -166,9 +205,13 @@ async def set_url(message: types.Message):
 async def stop(message: types.Message):
     chat_id = message.chat.id
     task = matching_tasks.pop(chat_id, None)
+
     if task:
         task.cancel()
-        keyboard = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Start Matching")]], resize_keyboard=True)
+        keyboard = ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="Start Matching")]],
+            resize_keyboard=True
+        )
         await message.answer("Matching stopped", reply_markup=keyboard)
     else:
         await message.answer("No matching running")
@@ -200,15 +243,18 @@ async def receive_token(message: types.Message):
         return await message.answer("Token already saved")
 
     user_tokens[chat_id] = message.text.strip()
+
     keyboard = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="Start Matching")]],
         resize_keyboard=True
     )
+
     await message.answer("Token saved", reply_markup=keyboard)
 
 
 async def main():
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
