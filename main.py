@@ -9,14 +9,15 @@ from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from motor.motor_asyncio import AsyncIOMotorClient
 
-# load env
+# ================= LOAD ENV =================
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 
-user_tokens = {}       # token saved until manually changed
-matching_tasks = {}    # active matching tasks
+# ================= GLOBALS =================
+user_tokens = {}
+matching_tasks = {}
 
 mongo = AsyncIOMotorClient(MONGO_URI)
 config = mongo["meeff_db"]["config"]
@@ -25,10 +26,8 @@ bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
 HEADERS = {
-    "User-Agent": "okhttp/5.1.0 (Linux; Android 13; Pixel 6 Build/TQ3A.230901.001)",
-    "Accept-Encoding": "gzip",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
+    "User-Agent": "okhttp/5.1.0 (Linux; Android 13)",
+    "Accept": "application/json",
     "Connection": "keep-alive",
     "Host": "api.meeff.com",
 }
@@ -36,20 +35,19 @@ HEADERS = {
 ANSWER_URL = "https://api.meeff.com/user/undoableAnswer/v5/?userId={user_id}&isOkay=1"
 
 
+# ================= HELPERS =================
 async def fetch_users(session, explore_url):
     async with session.get(explore_url) as res:
-        status = res.status
         text = await res.text()
-        if status != 200:
-            return status, text, None
         try:
             data = await res.json(content_type=None)
         except:
-            return status, text, None
-        return status, text, data
+            data = None
+        return res.status, text, data
 
 
-async def start_matching(chat_id, token, explore_url):
+# ================= MATCHING =================
+async def start_matching(chat_id, token, explore_url, validate_only=False):
     headers = HEADERS.copy()
     headers["meeff-access-token"] = token
 
@@ -60,129 +58,117 @@ async def start_matching(chat_id, token, explore_url):
         "matched": 0
     }
 
-    stat_msg = await bot.send_message(chat_id, "Matching started...")
+    stop_reason = None
+    empty_count = 0
 
     stop_keyboard = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="Stop Matching")]],
         resize_keyboard=True
     )
-    await stat_msg.edit_reply_markup(stop_keyboard)
+
+    status_msg = None
+    if not validate_only:
+        status_msg = await bot.send_message(
+            chat_id,
+            "🔄 Matching started...",
+            reply_markup=stop_keyboard
+        )
 
     timeout = aiohttp.ClientTimeout(total=30)
     connector = aiohttp.TCPConnector(ssl=False, limit_per_host=10)
 
-    empty_count = 0
-    stop_reason = None
+    async with aiohttp.ClientSession(
+        timeout=timeout,
+        connector=connector,
+        headers=headers
+    ) as session:
 
-    try:
-        async with aiohttp.ClientSession(
-            timeout=timeout,
-            connector=connector,
-            headers=headers
-        ) as session:
+        async def answer_user(user_id):
+            nonlocal stop_reason
+            try:
+                async with session.get(ANSWER_URL.format(user_id=user_id)) as res:
+                    text = await res.text()
 
-            async def answer_user(user_id):
-                nonlocal stop_reason
-                try:
-                    async with session.get(ANSWER_URL.format(user_id=user_id)) as res:
-                        text = await res.text()
+                    if res.status == 401 or "AuthRequired" in text:
+                        stop_reason = "token"
+                        return False
 
-                        if res.status == 429 or "LikeExceeded" in text:
-                            stop_reason = "limit"
-                            return False
+                    if res.status == 429 or "LikeExceeded" in text:
+                        stop_reason = "limit"
+                        return False
 
-                        if res.status == 401 or "AuthRequired" in text:
-                            stop_reason = "token"
-                            return False
-
-                        stats["matched"] += 1
-                        return True
-
-                except:
-                    stats["errors"] += 1
+                    stats["matched"] += 1
                     return True
+            except:
+                stats["errors"] += 1
+                return True
 
-            while chat_id in matching_tasks:
-                status, raw_text, data = await fetch_users(session, explore_url)
+        while chat_id in matching_tasks or validate_only:
+            status, raw, data = await fetch_users(session, explore_url)
 
-                if status == 401 or "AuthRequired" in str(raw_text):
-                    stop_reason = "token"
+            if status == 401:
+                stop_reason = "token"
+                break
+
+            if not data or not data.get("users"):
+                empty_count += 1
+                if empty_count >= 3:
+                    stop_reason = "empty"
                     break
+                await asyncio.sleep(1)
+                continue
 
-                if data is None or not data.get("users"):
-                    empty_count += 1
-                    if empty_count >= 6:
-                        stop_reason = "empty"
-                        break
-                    await asyncio.sleep(1)
+            empty_count = 0
+            users = data["users"]
+            batch_size = len(users)
+
+            tasks = []
+            for user in users:
+                uid = user.get("_id")
+                if not uid:
                     continue
 
-                empty_count = 0
-                users = data["users"]
-                batch_size = len(users)
+                tasks.append(asyncio.create_task(answer_user(uid)))
+                stats["requests"] += 1
 
-                tasks = []
-                results = []
+                if len(tasks) >= 10:
+                    await asyncio.gather(*tasks)
+                    tasks.clear()
 
-                for user in users:
-                    user_id = user.get("_id")
-                    if not user_id:
-                        continue
+                if validate_only and stats["matched"] >= 1:
+                    return True
 
-                    task = asyncio.create_task(answer_user(user_id))
-                    tasks.append(task)
-                    stats["requests"] += 1
+                await asyncio.sleep(random.uniform(0.05, 0.2))
 
-                    await asyncio.sleep(random.uniform(0.05, 0.2))
+            if tasks:
+                await asyncio.gather(*tasks)
 
-                    if len(tasks) >= 10:
-                        results.extend(await asyncio.gather(*tasks))
-                        tasks.clear()
+            stats["cycles"] += 1
 
-                if tasks:
-                    results.extend(await asyncio.gather(*tasks))
+            if validate_only:
+                break
 
-                if False in results:
-                    break
-
-                stats["cycles"] += 1
-
-                await stat_msg.edit_text(
-                    f"🔄 Matching in progress...\n\n"
-                    f"📦 Batches completed: {stats['cycles']}\n"
-                    f"👥 Users in last batch: {batch_size}\n"
-                    f"✅ Total matched: {stats['matched']}\n"
-                    f"📡 Requests sent: {stats['requests']}\n"
-                    f"⚠️ Errors: {stats['errors']}\n\n"
-                    f"Press Stop Matching to stop"
+            try:
+                await status_msg.edit_text(
+                    f"🔄 Matching running\n\n"
+                    f"📦 Batches: {stats['cycles']}\n"
+                    f"👥 Users in batch: {batch_size}\n"
+                    f"✅ Matched: {stats['matched']}\n"
+                    f"📡 Requests: {stats['requests']}\n"
+                    f"⚠️ Errors: {stats['errors']}"
                 )
+            except:
+                pass
 
-                await asyncio.sleep(random.uniform(1, 2))
+            await asyncio.sleep(1.5)
 
-    except Exception as e:
-        await stat_msg.edit_text(f"Error: {e}")
-
-    if stop_reason == "limit":
-        text = "Daily limit reached"
-    elif stop_reason == "token":
-        text = "Token expired"
-    elif stop_reason == "empty":
-        text = "No users found repeatedly"
-    else:
-        text = "Matching stopped"
-
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Start Matching")]],
-        resize_keyboard=True
-    )
-
-    await bot.send_message(chat_id, text, reply_markup=keyboard)
-    matching_tasks.pop(chat_id, None)
+    return stats["matched"] >= 1
 
 
+# ================= BOT COMMANDS =================
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("Send Meeff Token to begin")
+    await message.answer("Send Meeff token")
 
 
 @dp.message(Command("seturl"))
@@ -196,62 +182,77 @@ async def set_url(message: types.Message):
         {"$set": {"url": url}},
         upsert=True
     )
-
-    await message.answer("URL saved")
-
-
-@dp.message(Command("stop"))
-@dp.message(F.text == "Stop Matching")
-async def stop(message: types.Message):
-    chat_id = message.chat.id
-    task = matching_tasks.pop(chat_id, None)
-
-    if task:
-        task.cancel()
-        keyboard = ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="Start Matching")]],
-            resize_keyboard=True
-        )
-        await message.answer("Matching stopped", reply_markup=keyboard)
-    else:
-        await message.answer("No matching running")
+    await message.answer("Explore URL saved")
 
 
 @dp.message(F.text == "Start Matching")
-async def start_matching_btn(message: types.Message):
+async def start_btn(message: types.Message):
     chat_id = message.chat.id
 
     if chat_id not in user_tokens:
-        return await message.answer("Send Meeff token first")
+        return await message.answer("Send token first")
 
     data = await config.find_one({"_id": "explore_url"})
     if not data:
         return await message.answer("Use /seturl first")
 
-    explore_url = data["url"]
-    token = user_tokens[chat_id]
-
-    task = asyncio.create_task(start_matching(chat_id, token, explore_url))
+    task = asyncio.create_task(
+        start_matching(chat_id, user_tokens[chat_id], data["url"])
+    )
     matching_tasks[chat_id] = task
+
+
+@dp.message(F.text == "Stop Matching")
+@dp.message(Command("stop"))
+async def stop(message: types.Message):
+    task = matching_tasks.pop(message.chat.id, None)
+    if task:
+        task.cancel()
+
+    await message.answer(
+        "Matching stopped",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="Start Matching")]],
+            resize_keyboard=True
+        )
+    )
 
 
 @dp.message(F.text)
 async def receive_token(message: types.Message):
     chat_id = message.chat.id
+    token = message.text.strip()
 
-    if chat_id in user_tokens:
-        return await message.answer("Token already saved")
+    data = await config.find_one({"_id": "explore_url"})
+    if not data:
+        return await message.answer("Use /seturl first")
 
-    user_tokens[chat_id] = message.text.strip()
+    matching_tasks[chat_id] = True
 
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Start Matching")]],
-        resize_keyboard=True
+    valid = await start_matching(
+        chat_id,
+        token,
+        data["url"],
+        validate_only=True
     )
 
-    await message.answer("Token saved", reply_markup=keyboard)
+    matching_tasks.pop(chat_id, None)
+
+    if not valid:
+        return await message.answer("❌ Invalid or expired token")
+
+    user_tokens[chat_id] = token
+
+    await message.answer(
+        "✅ Token verified and saved",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="Start Matching")]],
+            resize_keyboard=True
+        )
+    )
 
 
+# ================= RUN =================
 async def main():
     await dp.start_polling(bot)
 
