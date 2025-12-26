@@ -1,13 +1,44 @@
 import asyncio
 import aiohttp
 import random
+import os
+from pathlib import Path
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from motor.motor_asyncio import AsyncIOMotorClient
 
-BOT_TOKEN = "8300519461:AAGub3h_FqGkggWkGGE95Pgh8k4u6deI_F4"
-MONGO_URI = "mongodb+srv://itxcriminal:qureshihashmI1@cluster0.jyqy9.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+def _load_env(path: str = ".env"):
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(path)
+        return
+    except Exception:
+        pass
+    p = Path(path)
+    if not p.exists():
+        return
+    try:
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if k not in os.environ:
+                os.environ[k] = v
+    except Exception:
+        pass
+
+_load_env()
+
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+MONGO_URI = os.environ.get("MONGO_URI")
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable is required")
+if not MONGO_URI:
+    raise RuntimeError("MONGO_URI environment variable is required")
 
 user_tokens = {}
 matching_tasks = {}
@@ -221,6 +252,11 @@ async def set_url(message: types.Message):
 
 
 async def main():
+    await bot.set_my_commands([
+        types.BotCommand("start", "Send Meeff Token."),
+        types.BotCommand("stop", "Stop Matching"),
+        types.BotCommand("seturl", "Set explore URL"),
+    ])
     await dp.start_polling(bot)
 
 
