@@ -7,8 +7,6 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import (
-    ReplyKeyboardMarkup,
-    KeyboardButton,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     CallbackQuery,
@@ -16,31 +14,9 @@ from aiogram.types import (
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from motor.motor_asyncio import AsyncIOMotorClient
+from dotenv import load_dotenv
 
-def _load_env(path: str = ".env"):
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(path)
-        return
-    except Exception:
-        pass
-    p = Path(path)
-    if not p.exists():
-        return
-    try:
-        for line in p.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            k = k.strip()
-            v = v.strip().strip('"').strip("'")
-            if k not in os.environ:
-                os.environ[k] = v
-    except Exception:
-        pass
-
-_load_env()
+load_dotenv()
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MONGO_URI = os.environ.get("MONGO_URI")
@@ -86,7 +62,7 @@ async def fetch_users(session, explore_url):
         return status, text, data
 
 
-async def start_matching(chat_id, token, explore_url, stat_msg, task_id):
+async def start_matching(chat_id, token, explore_url, stat_msg, task_id, keyboard):
     key = f"{chat_id}:{token}"
     headers = HEADERS_TEMPLATE.copy()
     headers["meeff-access-token"] = token
@@ -162,21 +138,22 @@ async def start_matching(chat_id, token, explore_url, stat_msg, task_id):
                 if stop_reason:
                     final_text += f"\n\n⚠️ {stop_reason}"
                 try:
-                    await stat_msg.edit_text(final_text)
+                    await stat_msg.edit_text(final_text, reply_markup=keyboard)
                 except:
                     pass
                 await asyncio.sleep(random.uniform(1, 2))
 
     except asyncio.CancelledError:
-        stop_reason = "STOPPED"
         try:
-            await stat_msg.edit_text(f"Stopped.\n\nRequests: {stats['requests']}\nCycles: {stats['cycles']}\nErrors: {stats['errors']}")
+            await stat_msg.edit_text(
+                f"Stopped.\n\nRequests: {stats['requests']}\nCycles: {stats['cycles']}\nErrors: {stats['errors']}"
+            )
         except:
             pass
         raise
     except Exception as e:
         try:
-            await stat_msg.edit_text(f"Error: {e}")
+            await stat_msg.edit_text(f"Error: {e}", reply_markup=keyboard)
         except:
             pass
 
@@ -226,34 +203,6 @@ async def _stop_task(callback: CallbackQuery):
     await callback.answer("Stopping task.", show_alert=False)
 
 
-@dp.message(F.text == "Start Matching")
-async def start_matching_btn(message):
-    chat_id = message.chat.id
-    tokens = user_tokens.get(chat_id)
-    if not tokens:
-        return await message.answer("Send token first.")
-    data = await config.find_one({"_id": "explore_url"})
-    if not data:
-        return await message.answer("Use /seturl first.")
-    explore_url = data["url"]
-    for token in list(tokens):
-        key = f"{chat_id}:{token}"
-        if key in matching_tasks:
-            continue
-        task_id = uuid.uuid4().hex
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Stop", callback_data=f"stop_task:{task_id}")]
-        ])
-        stat_msg = await bot.send_message(
-            chat_id,
-            "Live Stats:\nRequests: 0\nCycles: 0\nErrors: 0",
-            reply_markup=keyboard,
-        )
-        task = asyncio.create_task(start_matching(chat_id, token, explore_url, stat_msg, task_id))
-        matching_tasks[key] = task
-        task_meta[task_id] = {"key": key, "stat_msg": stat_msg, "running": True}
-
-
 @dp.message(F.text == "meeff")
 async def meeff_auto(message):
     chat_id = message.chat.id
@@ -277,7 +226,7 @@ async def meeff_auto(message):
             "Live Stats:\nRequests: 0\nCycles: 0\nErrors: 0",
             reply_markup=keyboard,
         )
-        task = asyncio.create_task(start_matching(chat_id, token, explore_url, stat_msg, task_id))
+        task = asyncio.create_task(start_matching(chat_id, token, explore_url, stat_msg, task_id, keyboard))
         matching_tasks[key] = task
         task_meta[task_id] = {"key": key, "stat_msg": stat_msg, "running": True}
 
@@ -305,13 +254,7 @@ async def receive_token(message):
     chat_id = message.chat.id
     token = message.text.strip()
     lst = user_tokens.get(chat_id, [])
-    if token in lst:
-        # if token already saved and already running, ignore
-        key = f"{chat_id}:{token}"
-        if key in matching_tasks:
-            return
-        # if saved but not running, fall through to start it
-    else:
+    if token not in lst:
         lst.append(token)
         user_tokens[chat_id] = lst
 
@@ -333,7 +276,7 @@ async def receive_token(message):
         "Live Stats:\nRequests: 0\nCycles: 0\nErrors: 0",
         reply_markup=keyboard,
     )
-    task = asyncio.create_task(start_matching(chat_id, token, explore_url, stat_msg, task_id))
+    task = asyncio.create_task(start_matching(chat_id, token, explore_url, stat_msg, task_id, keyboard))
     matching_tasks[key] = task
     task_meta[task_id] = {"key": key, "stat_msg": stat_msg, "running": True}
 
