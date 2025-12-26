@@ -287,9 +287,9 @@ async def set_url(message: types.Message):
 
 async def main():
     await bot.set_my_commands([
-        types.BotCommand("start", "Send Meeff Token."),
-        types.BotCommand("stop", "Stop Matching"),
-        types.BotCommand("seturl", "Set explore URL"),
+        types.BotCommand(command="start", description="Send Meeff Token."),
+        types.BotCommand(command="stop", description="Stop Matching"),
+        types.BotCommand(command="seturl", description="Set explore URL"),
     ])
     await dp.start_polling(bot)
 
