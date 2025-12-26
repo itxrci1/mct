@@ -6,6 +6,7 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.fsm.storage.memory import MemoryStorage
 from motor.motor_asyncio import AsyncIOMotorClient
 
 def _load_env(path: str = ".env"):
@@ -49,7 +50,7 @@ db = mongo["meeff_db"]
 config = db["config"]
 
 bot = Bot(BOT_TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(storage=MemoryStorage())
 
 HEADERS_TEMPLATE = {
     "User-Agent": "okhttp/5.1.0 (Linux; Android 13; Pixel 6 Build/TQ3A.230901.001)",
@@ -221,10 +222,8 @@ async def start_matching_btn(message: types.Message):
         matching_tasks[key] = task
 
 
-@dp.message()
+@dp.message(F.text == "meeff")
 async def meeff_auto(message: types.Message):
-    if not message.text or message.text.strip().lower() != "meeff":
-        return
     chat_id = message.chat.id
     tokens = user_tokens.get(chat_id)
     if not tokens:
