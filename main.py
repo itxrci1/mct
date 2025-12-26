@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, BotCommand
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, BotCommand, BotCommandScopeDefault
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -290,11 +290,14 @@ async def receive_token(message):
 
 
 async def main():
-    await bot.set_my_commands([
-        BotCommand(command="start", description="Send Meeff Token."),
-        BotCommand(command="stop", description="Stop Matching"),
-        BotCommand(command="seturl", description="Set explore URL"),
-    ])
+    try:
+        await bot.set_my_commands([
+            BotCommand(command="start", description="Send Meeff Token."),
+            BotCommand(command="stop", description="Stop Matching"),
+            BotCommand(command="seturl", description="Set explore URL"),
+        ], scope=BotCommandScopeDefault())
+    except Exception as e:
+        print("Failed to set bot commands:", e)
     await dp.start_polling(bot)
 
 
